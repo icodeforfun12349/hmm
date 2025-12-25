@@ -363,6 +363,25 @@ class UltimateBot:
         except:
             return []
     
+    def check_button_status(self, xpath):
+        """Check Zefoy button status (from browser.py)"""
+        try:
+            el = WebDriverWait(self.driver, 10).until(EC.presence_of_element_located((By.XPATH, xpath)))
+            return "online" if el.is_enabled() else "offline"
+        except TimeoutException:
+            # Try with ad XPaths
+            self.xpaths = self.xpathsWithAd
+            try:
+                views_idx = self.zefoy_names.index("Views")
+                el = WebDriverWait(self.driver, 5).until(
+                    EC.presence_of_element_located((By.XPATH, self.xpaths[views_idx]))
+                )
+                return "online" if el.is_enabled() else "offline"
+            except (TimeoutException, ValueError):
+                return "offline"
+        except Exception:
+            return "offline"
+    
     def display_service_selection(self):
         """Beautiful service selection menu"""
         self.clear_screen()
@@ -370,7 +389,7 @@ class UltimateBot:
         
         console.print("\n[bold white]Select services to run simultaneously:[/bold white]\n")
         
-        # Zefoy services
+        # Zefoy services - check actual status
         zefoy_table = Table(
             title="[bold cyan]ZEFOY SERVICES[/bold cyan]",
             box=box.ROUNDED,
@@ -383,11 +402,14 @@ class UltimateBot:
         zefoy_table.add_column("Status", width=12)
         zefoy_table.add_column("Rate", style="dim", width=25)
         
-        for i, name in enumerate(self.zefoy_names, 1):
+        for i, name in enumerate(self.zefoy_names):
+            # Check actual button status
+            status = self.check_button_status(self.xpaths[i])
+            status_display = "[green]●[/green] ONLINE" if status == "online" else "[red]●[/red] OFFLINE"
             zefoy_table.add_row(
-                f"Z{i}",
+                f"Z{i+1}",
                 name,
-                "[green]●[/green] ONLINE",
+                status_display,
                 "~25 per cycle"
             )
         
@@ -431,9 +453,11 @@ class UltimateBot:
         selection = console.input("[cyan]→[/cyan] Select services: ").strip()
         
         if not selection:
-            # Use all services
+            # Use all ONLINE services only
             for i in range(len(self.zefoy_names)):
-                self.selected_services.append(('zefoy', i, None))
+                status = self.check_button_status(self.xpaths[i])
+                if status == "online":
+                    self.selected_services.append(('zefoy', i, None))
             for service in zefame_services:
                 if service.get('available'):
                     self.selected_services.append(('zefame', service, None))
@@ -444,11 +468,19 @@ class UltimateBot:
                 if code.startswith('Z') and code[1:].isdigit():
                     idx = int(code[1:]) - 1
                     if 0 <= idx < len(self.zefoy_names):
-                        self.selected_services.append(('zefoy', idx, None))
+                        # Check if service is online
+                        status = self.check_button_status(self.xpaths[idx])
+                        if status == "online":
+                            self.selected_services.append(('zefoy', idx, None))
+                        else:
+                            console.print(f"[yellow]![/yellow] {self.zefoy_names[idx]} is offline, skipping")
                 elif code.startswith('F') and code[1:].isdigit():
                     idx = int(code[1:]) - 1
                     if 0 <= idx < len(zefame_services):
-                        self.selected_services.append(('zefame', zefame_services[idx], None))
+                        if zefame_services[idx].get('available'):
+                            self.selected_services.append(('zefame', zefame_services[idx], None))
+                        else:
+                            console.print(f"[yellow]![/yellow] Zefame service F{idx+1} is offline, skipping")
         
         if not self.selected_services:
             console.print("\n[red]✗[/red] No services selected")
@@ -695,6 +727,22 @@ class UltimateBot:
             )
             return True
         except TimeoutException:
+            return False
+    
+    def click_ad_button(self):
+        """Try to click ad button if present (from browser.py)"""
+        try:
+            selectors = ["button.fc-rewarded-ad-button", "button[class*='rewarded-ad']", "button.fc-list-item-button"]
+            for sel in selectors:
+                try:
+                    btn = WebDriverWait(self.driver, 1).until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+                    if btn and "View a short ad" in self.driver.page_source:
+                        btn.click()
+                        return True
+                except:
+                    continue
+            return False
+        except:
             return False
     
     def run_zefoy_service(self, service_idx, target_amount):
@@ -1091,7 +1139,72 @@ class UltimateBot:
             if not self.login():
                 return
             
-            # Service selection
+            # Initialize Zefoy FIRST (like browser.py)
+            self.clear_screen()
+            self.show_header("ZEFOY INITIALIZATION")
+            console.print()
+            console.print("[cyan]→[/cyan] Connecting to Zefoy...")
+            time.sleep(0.3)
+            
+            # Navigate to Zefoy
+            self.driver.get("https://zefoy.com/")
+            self.start_vignette_checker()
+            
+            # Wait for page load
+            console.print("[cyan]→[/cyan] Waiting for page to load...")
+            if not self.check_loaded('ua-check', 10):
+                console.print("[red]✗[/red] Page load timeout")
+                return
+            time.sleep(0.3)
+            console.print("[green]✓[/green] Page loaded successfully")
+            
+            # Wait for CAPTCHA
+            console.print("\n[yellow]![/yellow] [bold]Please solve the CAPTCHA manually[/bold]")
+            console.print("[cyan]→[/cyan] Waiting for CAPTCHA solution...")
+            if not self.check_loaded('row', 100):
+                console.print("[red]✗[/red] CAPTCHA timeout")
+                return
+            time.sleep(0.3)
+            console.print("[green]✓[/green] CAPTCHA solved")
+            
+            # Wait for ad
+            console.print("\n[cyan]→[/cyan] Checking for ads...")
+            time.sleep(0.3)
+            
+            self.should_close_vignette = False
+            time.sleep(1)
+            
+            try:
+                if self.click_ad_button():
+                    console.print("[green]✓[/green] Ad detected")
+                    print()
+                    
+                    ad_panel = Panel(
+                        "1. Watch the ad (~30 seconds)\n"
+                        "2. Click X when it appears\n"
+                        "3. Press ENTER to continue",
+                        title="[yellow]Action Required[/yellow]",
+                        border_style="yellow",
+                        box=box.ROUNDED
+                    )
+                    console.print(ad_panel)
+                    
+                    print()
+                    console.input("Press ENTER when ad is closed: ")
+                    time.sleep(0.3)
+                else:
+                    console.print("[green]✓[/green] No ad required")
+                    time.sleep(1)
+            except Exception as e:
+                console.print(f"[yellow]![/yellow] Ad check error (continuing anyway): {str(e)}")
+                time.sleep(1)
+            
+            self.should_close_vignette = True
+            console.print("[green]✓[/green] Zefoy initialized successfully")
+            self.zefoy_initialized = True
+            time.sleep(1)
+            
+            # NOW show service selection (with accurate status)
             if not self.display_service_selection():
                 return
             
@@ -1103,15 +1216,12 @@ class UltimateBot:
             if not self.get_video_url_input():
                 return
             
-            # Initialize Zefoy
+            # Final check
             self.clear_screen()
-            self.show_header("INITIALIZATION")
-            
-            if not self.initialize_zefoy():
-                console.print("\n[red]✗[/red] Failed to initialize Zefoy")
-                return
-            
-            console.print("[green]✓[/green] All systems ready")
+            self.show_header("FINAL CHECK")
+            console.print("\n[green]✓[/green] All systems ready")
+            console.print(f"[green]✓[/green] {len(self.selected_services)} service(s) configured")
+            console.print(f"[green]✓[/green] Video URL: {self.video_url[:50]}...")
             time.sleep(2)
             
             # Run automation
