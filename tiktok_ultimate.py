@@ -254,14 +254,54 @@ class UltimateBot:
             
             self.message_queue.put(('success', "CAPTCHA solved"))
             
-            # Handle ads (silent)
+            # Handle ads (automatic)
             self.should_close_vignette = False
             time.sleep(1)
             
             if self.click_ad_button():
-                self.message_queue.put(('warn', "Ad detected - watch and close it manually"))
-                # Don't block here, user will handle it
-                time.sleep(30)  # Give user time to watch ad
+                self.message_queue.put(('info', "Ad detected - waiting 35 seconds..."))
+                time.sleep(35)
+                
+                # Try to close ad automatically
+                close_attempts = 0
+                ad_closed = False
+                
+                while close_attempts < 10 and not ad_closed:
+                    try:
+                        ad_close_selectors = [
+                            "button[aria-label='Close ad']",
+                            "button[title='Close']",
+                            "div[id*='close']",
+                            "button.close",
+                            "[aria-label*='Close']",
+                            "div.ad-close",
+                            "button[class*='close']",
+                            "#closeButton"
+                        ]
+                        
+                        for selector in ad_close_selectors:
+                            try:
+                                close_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                                if close_btn.is_displayed():
+                                    close_btn.click()
+                                    ad_closed = True
+                                    self.message_queue.put(('success', "Ad closed automatically"))
+                                    break
+                            except:
+                                continue
+                        
+                        if ad_closed:
+                            break
+                        
+                        time.sleep(2)
+                        close_attempts += 1
+                    except:
+                        time.sleep(2)
+                        close_attempts += 1
+                
+                if not ad_closed:
+                    self.message_queue.put(('warn', "Could not close ad automatically - please close manually"))
+                    time.sleep(20)  # Give user time to close
             
             self.should_close_vignette = True
             self.message_queue.put(('success', "Zefoy re-initialized successfully"))
@@ -616,27 +656,72 @@ class UltimateBot:
                     self.close_google_vignette()
             except:
                 pass
-            time.sleep(2)
+            time.sleep(1)  # Check every 1 second for faster response
     
     def close_google_vignette(self):
-        """Try to close Google ads"""
+        """Try to close Google ads (enhanced version from browser.py)"""
         try:
-            selectors = [
+            close_selectors = [
                 "button[aria-label='Close ad']",
                 "div[id*='google_image_div'] button",
-                "#dismiss-button"
+                "button.close-button",
+                "div[onclick*='close']",
+                "#dismiss-button",
+                "button[title='Close']",
+                "div[id*='ad'] button",
+                "button[id*='close']",
+                "[aria-label*='Close']",
+                ".ad-close-button"
             ]
-            
-            for selector in selectors:
+
+            # Try main page first
+            for selector in close_selectors:
                 try:
-                    btn = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    if btn.is_displayed():
-                        btn.click()
-                        return True
-                except:
+                    close_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    if close_btn.is_displayed():
+                        try:
+                            close_btn.click()
+                            return True
+                        except:
+                            try:
+                                self.driver.execute_script("arguments[0].click();", close_btn)
+                                return True
+                            except:
+                                continue
+                except NoSuchElementException:
                     continue
-        except:
-            pass
+
+            # Try iframes
+            iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+            for iframe in iframes:
+                try:
+                    self.driver.switch_to.frame(iframe)
+                    for selector in close_selectors:
+                        try:
+                            close_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                            if close_btn.is_displayed():
+                                try:
+                                    close_btn.click()
+                                    self.driver.switch_to.default_content()
+                                    return True
+                                except:
+                                    try:
+                                        self.driver.execute_script("arguments[0].click();", close_btn)
+                                        self.driver.switch_to.default_content()
+                                        return True
+                                    except:
+                                        continue
+                        except NoSuchElementException:
+                            continue
+                    self.driver.switch_to.default_content()
+                except:
+                    self.driver.switch_to.default_content()
+                    continue
+        except Exception:
+            try:
+                self.driver.switch_to.default_content()
+            except:
+                pass
         return False
     
     def robust_click(self, xpath, timeout=10, max_retries=3, silent=False):
@@ -745,6 +830,200 @@ class UltimateBot:
         except:
             return False
     
+    def solve_with_ocr(self, img_bytes, attempt=0):
+        """Solve CAPTCHA using Tesseract OCR with 10 different preprocessing strategies"""
+        try:
+            import pytesseract
+            from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+            import io
+            import re
+            
+            img_pil = Image.open(io.BytesIO(img_bytes))
+            
+            # Save original for debugging (only first attempt)
+            if attempt == 0:
+                try:
+                    img_pil.save('/tmp/captcha_original.png')
+                    console.print("[dim]Debug: Saved to /tmp/captcha_original.png[/dim]")
+                except:
+                    pass
+            
+            # 10 DIFFERENT PREPROCESSING STRATEGIES
+            
+            if attempt == 0:
+                # Strategy 1: Standard processing
+                img_pil = img_pil.convert('L')
+                img_pil = img_pil.resize((img_pil.width * 3, img_pil.height * 3), Image.Resampling.LANCZOS)
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(2.5)
+                enhancer = ImageEnhance.Sharpness(img_pil)
+                img_pil = enhancer.enhance(2.0)
+                img_pil = img_pil.point(lambda x: 0 if x < 140 else 255, '1')
+                img_pil = img_pil.filter(ImageFilter.MedianFilter(3))
+                
+            elif attempt == 1:
+                # Strategy 2: High contrast
+                img_pil = img_pil.convert('L')
+                img_pil = img_pil.resize((img_pil.width * 4, img_pil.height * 4), Image.Resampling.LANCZOS)
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(3.5)
+                img_pil = img_pil.point(lambda x: 0 if x < 130 else 255, '1')
+                
+            elif attempt == 2:
+                # Strategy 3: Low threshold
+                img_pil = img_pil.convert('L')
+                img_pil = img_pil.resize((img_pil.width * 3, img_pil.height * 3), Image.Resampling.LANCZOS)
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(2.0)
+                img_pil = img_pil.point(lambda x: 0 if x < 110 else 255, '1')
+                
+            elif attempt == 3:
+                # Strategy 4: High threshold
+                img_pil = img_pil.convert('L')
+                img_pil = img_pil.resize((img_pil.width * 3, img_pil.height * 3), Image.Resampling.LANCZOS)
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(2.5)
+                img_pil = img_pil.point(lambda x: 0 if x < 170 else 255, '1')
+                
+            elif attempt == 4:
+                # Strategy 5: Inverted colors
+                img_pil = img_pil.convert('L')
+                img_pil = ImageOps.invert(img_pil)
+                img_pil = img_pil.resize((img_pil.width * 3, img_pil.height * 3), Image.Resampling.LANCZOS)
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(2.5)
+                img_pil = img_pil.point(lambda x: 0 if x < 140 else 255, '1')
+                
+            elif attempt == 5:
+                # Strategy 6: Heavy denoising
+                img_pil = img_pil.convert('L')
+                img_pil = img_pil.resize((img_pil.width * 3, img_pil.height * 3), Image.Resampling.LANCZOS)
+                img_pil = img_pil.filter(ImageFilter.MedianFilter(5))
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(3.0)
+                img_pil = img_pil.point(lambda x: 0 if x < 140 else 255, '1')
+                
+            elif attempt == 6:
+                # Strategy 7: Edge enhancement
+                img_pil = img_pil.convert('L')
+                img_pil = img_pil.resize((img_pil.width * 3, img_pil.height * 3), Image.Resampling.LANCZOS)
+                img_pil = img_pil.filter(ImageFilter.EDGE_ENHANCE_MORE)
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(2.5)
+                img_pil = img_pil.point(lambda x: 0 if x < 140 else 255, '1')
+                
+            elif attempt == 7:
+                # Strategy 8: Super sharp
+                img_pil = img_pil.convert('L')
+                img_pil = img_pil.resize((img_pil.width * 4, img_pil.height * 4), Image.Resampling.LANCZOS)
+                enhancer = ImageEnhance.Sharpness(img_pil)
+                img_pil = enhancer.enhance(3.0)
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(2.5)
+                img_pil = img_pil.point(lambda x: 0 if x < 140 else 255, '1')
+                
+            elif attempt == 8:
+                # Strategy 9: Minimal processing (sometimes less is more)
+                img_pil = img_pil.convert('L')
+                img_pil = img_pil.resize((img_pil.width * 2, img_pil.height * 2), Image.Resampling.LANCZOS)
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(1.5)
+                
+            else:
+                # Strategy 10: Bilateral filter approach
+                img_pil = img_pil.convert('L')
+                img_pil = img_pil.resize((img_pil.width * 3, img_pil.height * 3), Image.Resampling.LANCZOS)
+                img_pil = img_pil.filter(ImageFilter.SMOOTH_MORE)
+                enhancer = ImageEnhance.Contrast(img_pil)
+                img_pil = enhancer.enhance(2.8)
+                img_pil = img_pil.point(lambda x: 0 if x < 150 else 255, '1')
+            
+            # Save processed for debugging (only first attempt)
+            if attempt == 0:
+                try:
+                    img_pil.save('/tmp/captcha_processed.png')
+                    console.print("[dim]Debug: Saved to /tmp/captcha_processed.png[/dim]")
+                except:
+                    pass
+            
+            # Try multiple OCR configurations
+            configs = [
+                '--psm 8 --oem 3 -c tessedit_char_whitelist=abcdefghijklmnopqrstuvwxyz',
+                '--psm 7 --oem 3 -c tessedit_char_whitelist=abcdefghijklmnopqrstuvwxyz',
+                '--psm 13 -c tessedit_char_whitelist=abcdefghijklmnopqrstuvwxyz',
+                '--psm 8 --oem 1',
+                '--psm 7',
+                '--psm 6',
+                '--psm 3'
+            ]
+            
+            for config in configs:
+                try:
+                    text = pytesseract.image_to_string(img_pil, config=config).strip()
+                    # Clean text - only letters
+                    text = re.sub(r'[^a-zA-Z]', '', text).lower()
+                    
+                    if text and len(text) >= 4:
+                        return text
+                except:
+                    continue
+            
+            return None
+        except ImportError:
+            if attempt == 0:
+                console.print("[dim]OCR: pytesseract not installed[/dim]")
+                console.print("[dim]Install: pip install pytesseract pillow[/dim]")
+            return None
+        except Exception as e:
+            if attempt == 0:
+                console.print(f"[dim]OCR error: {str(e)}[/dim]")
+            return None
+    
+    def submit_captcha(self, input_element, text):
+        """Submit CAPTCHA text and check if accepted"""
+        try:
+            # Clear and enter text
+            input_element.clear()
+            time.sleep(0.3)
+            input_element.send_keys(text)
+            time.sleep(0.3)
+            
+            # Find submit button
+            submit_btn = None
+            try:
+                parent = input_element.find_element(By.XPATH, "../..")
+                buttons = parent.find_elements(By.TAG_NAME, "button")
+                for btn in buttons:
+                    if btn.is_displayed():
+                        submit_btn = btn
+                        break
+            except:
+                pass
+            
+            if not submit_btn:
+                buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                for btn in buttons:
+                    if btn.is_displayed() and btn.size['height'] > 0:
+                        submit_btn = btn
+                        break
+            
+            if submit_btn:
+                console.print("[cyan]→[/cyan] Submitting...")
+                submit_btn.click()
+                time.sleep(3)
+                
+                # Check if accepted
+                try:
+                    self.driver.find_element(By.CLASS_NAME, 'row')
+                    return True
+                except:
+                    return False
+            
+            return False
+        except Exception as e:
+            console.print(f"[yellow]![/yellow] Submit error: {str(e)}")
+            return False
+    
     def run_zefoy_service(self, service_idx, target_amount):
         """Run a Zefoy service"""
         service_name = self.zefoy_names[service_idx]
@@ -784,7 +1063,10 @@ class UltimateBot:
         # Main loop
         while current_amount < target_amount:
             try:
-                # Check for long rate limit BEFORE waiting
+                # Wait for timer to appear first
+                time.sleep(2)
+                
+                # Check for long rate limit IMMEDIATELY
                 is_long_limit, minutes = self.check_long_rate_limit()
                 if is_long_limit:
                     self.message_queue.put(('warn', f"Zefoy {service_name}: Long rate limit detected ({minutes} min) - restarting browser..."))
@@ -822,12 +1104,14 @@ class UltimateBot:
                         self.robust_click(self.send_button[service_idx], timeout=10)
                         
                         self.message_queue.put(('success', f"Zefoy {service_name}: Resumed after browser restart"))
+                        # Check again for long rate limit after restart
+                        time.sleep(2)
                         continue
                     else:
                         self.message_queue.put(('error', f"Zefoy {service_name}: Browser restart failed"))
                         return
                 
-                # Wait for timer
+                # Wait for timer to be ready
                 WebDriverWait(self.driver, 900).until(
                     EC.text_to_be_present_in_element(
                         (By.XPATH, self.timer_text[service_idx]),
@@ -1004,6 +1288,9 @@ class UltimateBot:
         self.zefoy_running = True
         self.zefame_running = True
         
+        # Persistent message history
+        message_history = []
+        
         # Start all service threads
         threads = []
         
@@ -1028,71 +1315,75 @@ class UltimateBot:
         # Live dashboard
         self.clear_screen()
         
-        with Live(console=console, refresh_per_second=2, screen=False) as live:
-            while any(t.is_alive() for t in threads):
-                # Create layout
-                layout = Table.grid(expand=True)
-                layout.add_column()
-                layout.add_column()
-                
-                # Header
-                header = Panel(
-                    "[bold cyan]TIKTOK ULTIMATE[/bold cyan] [dim]│ Live Dashboard[/dim]",
-                    border_style="cyan",
-                    box=box.ROUNDED
-                )
-                
-                # Stats and services
-                stats_panel = self.create_stats_panel()
-                services_panel = self.create_services_panel()
-                
-                # Messages
-                messages = []
-                while not self.message_queue.empty():
-                    try:
-                        msg_type, msg_text = self.message_queue.get_nowait()
-                        color_map = {
-                            'success': 'green',
-                            'error': 'red',
-                            'warn': 'yellow',
-                            'info': 'cyan'
-                        }
-                        color = color_map.get(msg_type, 'white')
-                        messages.append(f"[{color}]●[/{color}] {msg_text}")
-                    except:
-                        break
-                
-                # Keep last 10 messages
-                messages = messages[-10:]
-                
-                messages_panel = Panel(
-                    "\n".join(messages) if messages else "[dim]Waiting for activity...[/dim]",
-                    title="[bold white]ACTIVITY LOG[/bold white]",
-                    border_style="white",
-                    box=box.ROUNDED,
-                    padding=(1, 2),
-                    height=14
-                )
-                
-                # Build layout
-                top_row = Table.grid(expand=True)
-                top_row.add_column(ratio=1)
-                top_row.add_column(ratio=1)
-                top_row.add_row(stats_panel, services_panel)
-                
-                final_layout = Table.grid(expand=True)
-                final_layout.add_row(header)
-                final_layout.add_row("")
-                final_layout.add_row(top_row)
-                final_layout.add_row("")
-                final_layout.add_row(messages_panel)
-                
-                live.update(final_layout)
-                time.sleep(0.5)
+        try:
+            with Live(console=console, refresh_per_second=2, screen=False) as live:
+                while any(t.is_alive() for t in threads):
+                    # Create layout
+                    layout = Table.grid(expand=True)
+                    layout.add_column()
+                    layout.add_column()
+                    
+                    # Header
+                    header = Panel(
+                        "[bold cyan]TIKTOK ULTIMATE[/bold cyan] [dim]│ Live Dashboard[/dim]",
+                        border_style="cyan",
+                        box=box.ROUNDED
+                    )
+                    
+                    # Stats and services
+                    stats_panel = self.create_stats_panel()
+                    services_panel = self.create_services_panel()
+                    
+                    # Collect NEW messages and add to history
+                    while not self.message_queue.empty():
+                        try:
+                            msg_type, msg_text = self.message_queue.get_nowait()
+                            color_map = {
+                                'success': 'green',
+                                'error': 'red',
+                                'warn': 'yellow',
+                                'info': 'cyan'
+                            }
+                            color = color_map.get(msg_type, 'white')
+                            # Escape any markup in the message
+                            safe_text = escape(str(msg_text))
+                            message_history.append(f"[{color}]●[/{color}] {safe_text}")
+                        except:
+                            break
+                    
+                    # Keep last 15 messages (increased from 10)
+                    display_messages = message_history[-15:]
+                    
+                    messages_panel = Panel(
+                        "\n".join(display_messages) if display_messages else "[dim]Waiting for activity...[/dim]",
+                        title="[bold white]ACTIVITY LOG[/bold white]",
+                        border_style="white",
+                        box=box.ROUNDED,
+                        padding=(1, 2),
+                        height=14
+                    )
+                    
+                    # Build layout
+                    top_row = Table.grid(expand=True)
+                    top_row.add_column(ratio=1)
+                    top_row.add_column(ratio=1)
+                    top_row.add_row(stats_panel, services_panel)
+                    
+                    final_layout = Table.grid(expand=True)
+                    final_layout.add_row(header)
+                    final_layout.add_row("")
+                    final_layout.add_row(top_row)
+                    final_layout.add_row("")
+                    final_layout.add_row(messages_panel)
+                    
+                    live.update(final_layout)
+                    time.sleep(0.5)
+        except KeyboardInterrupt:
+            console.print("\n\n[yellow]![/yellow] Stopping all services...")
         
         # Wait for all threads
         for thread in threads:
-            thread.join()
+            thread.join(timeout=5)
         
         self.show_completion()
     
@@ -1150,6 +1441,54 @@ class UltimateBot:
             self.driver.get("https://zefoy.com/")
             self.start_vignette_checker()
             
+            # Handle consent popup first
+            console.print("[cyan]→[/cyan] Checking for consent popup...")
+            time.sleep(2)
+            
+            consent_clicked = False
+            consent_selectors = [
+                "button:contains('Consent')",
+                "button:contains('Accept')",
+                "button:contains('Agree')",
+                "[class*='consent'] button",
+                "[id*='consent'] button",
+                "button[class*='accept']",
+                ".fc-cta-consent",
+                ".fc-button-label:contains('Consent')"
+            ]
+            
+            # Try CSS selectors
+            for selector in consent_selectors:
+                try:
+                    # For :contains selectors, we need to find by text
+                    if ':contains' in selector:
+                        buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                        for button in buttons:
+                            if button.text and ('consent' in button.text.lower() or 
+                                               'accept' in button.text.lower() or 
+                                               'agree' in button.text.lower()):
+                                button.click()
+                                consent_clicked = True
+                                console.print("[green]✓[/green] Consent popup accepted automatically")
+                                break
+                    else:
+                        element = self.driver.find_element(By.CSS_SELECTOR, selector)
+                        if element.is_displayed():
+                            element.click()
+                            consent_clicked = True
+                            console.print("[green]✓[/green] Consent popup accepted automatically")
+                            break
+                except:
+                    continue
+                
+                if consent_clicked:
+                    break
+            
+            if not consent_clicked:
+                console.print("[yellow]![/yellow] No consent popup found (might be already accepted)")
+            
+            time.sleep(2)
+            
             # Wait for page load
             console.print("[cyan]→[/cyan] Waiting for page to load...")
             if not self.check_loaded('ua-check', 10):
@@ -1158,14 +1497,95 @@ class UltimateBot:
             time.sleep(0.3)
             console.print("[green]✓[/green] Page loaded successfully")
             
-            # Wait for CAPTCHA
-            console.print("\n[yellow]![/yellow] [bold]Please solve the CAPTCHA manually[/bold]")
-            console.print("[cyan]→[/cyan] Waiting for CAPTCHA solution...")
+            # Handle text-based CAPTCHA with multiple FREE solving methods
+            console.print("\n[cyan]→[/cyan] Checking for text CAPTCHA...")
+            time.sleep(2)
+            
+            captcha_solved = False
+            captcha_input = None
+            captcha_img = None
+            
+            # First, find the CAPTCHA elements
+            console.print("[cyan]→[/cyan] Locating CAPTCHA elements...")
+            
+            input_selectors = [
+                "input[placeholder*='word' i]",
+                "input[placeholder*='enter' i]",
+                "input[type='text']",
+                "input.form-control"
+            ]
+            
+            for selector in input_selectors:
+                try:
+                    inputs = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    for inp in inputs:
+                        if inp.is_displayed():
+                            captcha_input = inp
+                            # Find image near this input
+                            try:
+                                parent = inp.find_element(By.XPATH, "../..")
+                                imgs = parent.find_elements(By.TAG_NAME, "img")
+                                for img in imgs:
+                                    if img.is_displayed():
+                                        captcha_img = img
+                                        break
+                            except:
+                                pass
+                            
+                            if captcha_img:
+                                break
+                    if captcha_input and captcha_img:
+                        break
+                except:
+                    continue
+            
+            if not captcha_input or not captcha_img:
+                console.print("[yellow]![/yellow] Could not locate CAPTCHA elements")
+                console.print("[cyan]→[/cyan] Waiting for manual CAPTCHA solution...")
+                if not self.check_loaded('row', 100):
+                    console.print("[red]✗[/red] CAPTCHA timeout")
+                    return
+                console.print("[green]✓[/green] CAPTCHA solved manually")
+                captcha_solved = True
+            
+            if not captcha_solved:
+                console.print("[green]✓[/green] Found CAPTCHA elements")
+                
+                # Get the CAPTCHA image
+                img_screenshot = captcha_img.screenshot_as_png
+                
+                # Try multiple FREE OCR methods with different preprocessing
+                console.print("\n[cyan]→[/cyan] Trying 10 different OCR strategies...")
+                
+                for attempt in range(10):
+                    captcha_text = self.solve_with_ocr(img_screenshot, attempt)
+                    if captcha_text:
+                        console.print(f"[cyan]→[/cyan] Attempt {attempt + 1}/10: '{captcha_text}'")
+                        if self.submit_captcha(captcha_input, captcha_text):
+                            captcha_solved = True
+                            console.print(f"[green]✓[/green] OCR solved on attempt {attempt + 1}!")
+                            break
+                        else:
+                            console.print(f"[yellow]![/yellow] Incorrect")
+                            time.sleep(1)
+                
+                # Manual fallback
+                if not captcha_solved:
+                    console.print("\n[yellow]![/yellow] All OCR attempts failed")
+                    console.print("[cyan]→[/cyan] Please solve manually")
+                    console.print("[dim]Tip: Look at the image above and type the word you see[/dim]")
+                    console.print("[cyan]→[/cyan] Waiting for manual CAPTCHA solution...")
+            
+            # Wait for CAPTCHA to be solved (whether auto or manual)
             if not self.check_loaded('row', 100):
                 console.print("[red]✗[/red] CAPTCHA timeout")
                 return
+            
+            if not captcha_solved:
+                console.print("[green]✓[/green] CAPTCHA solved manually")
+            
             time.sleep(0.3)
-            console.print("[green]✓[/green] CAPTCHA solved")
+            console.print("[green]✓[/green] CAPTCHA complete")
             
             # Wait for ad
             console.print("\n[cyan]→[/cyan] Checking for ads...")
@@ -1176,21 +1596,84 @@ class UltimateBot:
             
             try:
                 if self.click_ad_button():
-                    console.print("[green]✓[/green] Ad detected")
-                    print()
+                    console.print("[green]✓[/green] Ad started - waiting 35 seconds for ad to complete...")
                     
-                    ad_panel = Panel(
-                        "1. Watch the ad (~30 seconds)\n"
-                        "2. Click X when it appears\n"
-                        "3. Press ENTER to continue",
-                        title="[yellow]Action Required[/yellow]",
-                        border_style="yellow",
-                        box=box.ROUNDED
-                    )
-                    console.print(ad_panel)
+                    # Wait for ad to play (typically 30 seconds)
+                    time.sleep(35)
                     
-                    print()
-                    console.input("Press ENTER when ad is closed: ")
+                    # Now try to close the ad automatically
+                    console.print("[cyan]→[/cyan] Attempting to close ad automatically...")
+                    
+                    # Try to find and click the X button
+                    close_attempts = 0
+                    max_attempts = 10
+                    ad_closed = False
+                    
+                    while close_attempts < max_attempts and not ad_closed:
+                        try:
+                            # Common ad close button selectors
+                            ad_close_selectors = [
+                                "button[aria-label='Close ad']",
+                                "button[title='Close']",
+                                "div[id*='close']",
+                                "button.close",
+                                "[aria-label*='Close']",
+                                "div.ad-close",
+                                "button[class*='close']",
+                                "#closeButton",
+                                ".close-button",
+                                "button[onclick*='close']"
+                            ]
+                            
+                            for selector in ad_close_selectors:
+                                try:
+                                    close_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                                    if close_btn.is_displayed():
+                                        close_btn.click()
+                                        ad_closed = True
+                                        console.print("[green]✓[/green] Ad closed automatically!")
+                                        break
+                                except:
+                                    continue
+                            
+                            # Also check iframes
+                            if not ad_closed:
+                                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                                for iframe in iframes:
+                                    try:
+                                        self.driver.switch_to.frame(iframe)
+                                        for selector in ad_close_selectors:
+                                            try:
+                                                close_btn = self.driver.find_element(By.CSS_SELECTOR, selector)
+                                                if close_btn.is_displayed():
+                                                    close_btn.click()
+                                                    ad_closed = True
+                                                    console.print("[green]✓[/green] Ad closed automatically!")
+                                                    break
+                                            except:
+                                                continue
+                                        self.driver.switch_to.default_content()
+                                        if ad_closed:
+                                            break
+                                    except:
+                                        self.driver.switch_to.default_content()
+                                        continue
+                            
+                            if ad_closed:
+                                break
+                            
+                            time.sleep(2)
+                            close_attempts += 1
+                            
+                        except Exception as e:
+                            time.sleep(2)
+                            close_attempts += 1
+                    
+                    if not ad_closed:
+                        console.print("[yellow]![/yellow] Could not find ad close button automatically")
+                        console.print("[yellow]![/yellow] Please close the ad manually and press ENTER")
+                        console.input("Press ENTER when ad is closed: ")
+                    
                     time.sleep(0.3)
                 else:
                     console.print("[green]✓[/green] No ad required")
